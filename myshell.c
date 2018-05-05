@@ -15,6 +15,8 @@
 const char* COMMAND_EXIT = "exit";
 const char* COMMAND_HELP = "help";
 const char* COMMAND_CD = "cd";
+const char* COMMAND_IN = "<";
+const char* COMMAND_OUT = ">";
 
 // 内置的状态码
 enum {
@@ -26,7 +28,12 @@ enum {
 	ERROR_TOO_MANY_PARAMETER,
 	ERROR_CD,
 	ERROR_SYSTEM,
-	ERROR_EXIT
+	ERROR_EXIT,
+
+	/* 重定向的错误信息 */
+	ERROR_MANY_IN,
+	ERROR_MANY_OUT,
+	ERROR_FILE_NOT_EXIST
 };
 
 char username[BUF_SZ];
@@ -110,6 +117,18 @@ int main() {
 					case ERROR_COMMAND:
 						fprintf(stderr, "\e[31;1mError: Command not exist in myshell.\n\e[0m");
 						break;
+					case ERROR_MANY_IN:
+						fprintf(stderr, "\e[31;1mError: Too many redirection symbol \"%s\".\n\e[0m", COMMAND_IN);
+						break;
+					case ERROR_MANY_OUT:
+						fprintf(stderr, "\e[31;1mError: Too many redirection symbol \"%s\".\n\e[0m", COMMAND_OUT);
+						break;
+					case ERROR_FILE_NOT_EXIST:
+						fprintf(stderr, "\e[31;1mError: Input redirection file not exist.\n\e[0m");
+						break;
+					case ERROR_MISS_PARAMETER:
+						fprintf(stderr, "\e[31;1mError: Miss redirect file parameters.\n\e[0m");
+						break;
 				}
 			}
 		}
@@ -129,7 +148,6 @@ int isCommandExist(const char* command) {
 		char tmp[BUF_SZ];
 		sprintf(tmp, "command -v %s", command);
 		system(tmp);
-	//	execlp("which", "which", command, NULL);
 		exit(1);
 	} else {
 		waitpid(pid, NULL, 0);
@@ -196,15 +214,59 @@ int callCommand(int commandNum) {
 		return ERROR_COMMAND;
 	}	
 
+	/* 判断是否有重定向 */
+	int inNum = 0, outNum = 0;
+	char *inFile = NULL, *outFile = NULL;
+	int endIdx = commandNum;
+
+	for (int i=0; i<commandNum; ++i) {
+		if (strcmp(commands[i], COMMAND_IN) == 0) {
+			++inNum;
+			if (i+1 < commandNum)
+				inFile = commands[i+1];
+			else return ERROR_MISS_PARAMETER;
+
+			if (endIdx == commandNum) endIdx = i;
+		} else if (strcmp(commands[i], COMMAND_OUT) == 0) {
+			++outNum;
+			if (i+1 < commandNum)
+				outFile = commands[i+1];
+			else return ERROR_MISS_PARAMETER;
+				
+			if (endIdx == commandNum) endIdx = i;
+		}
+	}
+	/* 处理重定向 */
+	if (inNum == 1) {
+		FILE* fp = fopen(inFile, "r");
+		if (fp == NULL) // 输入重定向文件不存在
+			return ERROR_FILE_NOT_EXIST;
+		
+		fclose(fp);
+	}
+	
+	if (inNum > 1) { // 输入重定向符超过一个
+		return ERROR_MANY_IN;
+	} else if (outNum > 1) { // 输出重定向符超过一个
+		return ERROR_MANY_OUT;
+	}
+
 	int result = RESULT_NORMAL;
 	pid_t pid = vfork();
 	if (pid == -1) {
 		result = ERROR_FORK;
-	} else if (pid == 0) { // 执行命令
+	} else if (pid == 0) {
+		/* 输入输出重定向 */
+		if (inNum == 1)
+			freopen(inFile, "r", stdin);
+		if (outNum == 1)
+			freopen(outFile, "w", stdout);
+
+		/* 执行命令 */
 		char* comm[BUF_SZ];
-		for (int i=0; i<commandNum; ++i)
+		for (int i=0; i<endIdx; ++i)
 			comm[i] = commands[i];
-		comm[commandNum] = NULL;
+		comm[endIdx] = NULL;
 		execvp(comm[0], comm);
 		exit(errno); // 执行出错，返回errno
 	} else {
@@ -216,6 +278,7 @@ int callCommand(int commandNum) {
 			printf("\e[31;1mError: %s\n\e[0m", strerror(err));
 		}
 	}
+
 
 	return result;
 }

@@ -43,7 +43,6 @@ enum {
 
 char username[BUF_SZ];
 char hostname[BUF_SZ];
-char outputFile[BUF_SZ]; // isCommandExist函数中的文件输出路径，用于检验命令是否存在
 char curPath[BUF_SZ];
 char commands[BUF_SZ][BUF_SZ];
 
@@ -59,21 +58,17 @@ int callCommandWithRedi(int left, int right);
 int callCd(int commandNum);
 
 int main() {
-	char argv[BUF_SZ];
-
-	getUsername();
-	getHostname();
+	/* 获取当前工作目录、用户名、主机名 */
 	int result = getCurWorkDir();
 	if (ERROR_SYSTEM == result) {
 		fprintf(stderr, "\e[31;1mError: System error while getting current work directory.\n\e[0m");
 		exit(ERROR_SYSTEM);
 	}
-
-	/* 更新outputFile的值 */
-	strcpy(outputFile, curPath);
-	strcat(outputFile, "/command.res");
+	getUsername();
+	getHostname();
 
 	/* 启动myshell */
+	char argv[BUF_SZ];
 	while (TRUE) {
 		printf("\e[32;1m%s@%s:%s\e[0m$ ", username, hostname,curPath); // 显示为绿色
 		/* 获取用户输入的命令 */
@@ -115,7 +110,7 @@ int main() {
 							break;
 						}
 				}
-			} else {
+			} else { // 其它命令
 				result = callCommand(commandNum);
 				switch (result) {
 					case ERROR_FORK:

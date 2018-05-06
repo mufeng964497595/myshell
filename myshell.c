@@ -17,6 +17,7 @@ const char* COMMAND_HELP = "help";
 const char* COMMAND_CD = "cd";
 const char* COMMAND_IN = "<";
 const char* COMMAND_OUT = ">";
+const char* COMMAND_PIPE = "|";
 
 // 内置的状态码
 enum {
@@ -33,7 +34,11 @@ enum {
 	/* 重定向的错误信息 */
 	ERROR_MANY_IN,
 	ERROR_MANY_OUT,
-	ERROR_FILE_NOT_EXIST
+	ERROR_FILE_NOT_EXIST,
+	
+	/* 管道的错误信息 */
+	ERROR_PIPE,
+	ERROR_PIPE_MISS_PARAMETER
 };
 
 char username[BUF_SZ];
@@ -49,6 +54,8 @@ int getCurWorkDir();
 int splitCommands(char command[BUF_SZ]);
 int callExit();
 int callCommand(int commandNum);
+int callCommandWithPipe(int left, int right);
+int callCommandWithRedi(int left, int right);
 int callCd(int commandNum);
 
 int main() {
@@ -78,13 +85,13 @@ int main() {
 
 		int commandNum = splitCommands(argv);
 		
-		if (commandNum != 0) {
-			if (strcmp(commands[0], COMMAND_EXIT) == 0) {
+		if (commandNum != 0) { // 用户有输入指令
+			if (strcmp(commands[0], COMMAND_EXIT) == 0) { // exit命令
 				result = callExit();
 				if (ERROR_EXIT == result) {
 					exit(-1);
 				}
-			} else if (strcmp(commands[0], COMMAND_CD) == 0) {
+			} else if (strcmp(commands[0], COMMAND_CD) == 0) { // cd命令
 				result = callCd(commandNum);
 				switch (result) {
 					case ERROR_MISS_PARAMETER:
@@ -98,7 +105,7 @@ int main() {
 						fprintf(stderr, "\e[31;1mError: Too many parameters while using command \"%s\".\n\e[0m"
 							, COMMAND_CD);
 						break;
-					case RESULT_NORMAL:
+					case RESULT_NORMAL: // cd命令正常执行，更新当前工作l目录
 						result = getCurWorkDir();
 						if (ERROR_SYSTEM == result) {
 							fprintf(stderr
@@ -112,7 +119,7 @@ int main() {
 				result = callCommand(commandNum);
 				switch (result) {
 					case ERROR_FORK:
-						fprintf(stderr, "\e[31;1mError: Fork error in line %d.\n\e[0m", __LINE__);
+						fprintf(stderr, "\e[31;1mError: Fork error.\n\e[0m");
 						exit(ERROR_FORK);
 					case ERROR_COMMAND:
 						fprintf(stderr, "\e[31;1mError: Command not exist in myshell.\n\e[0m");
@@ -129,13 +136,19 @@ int main() {
 					case ERROR_MISS_PARAMETER:
 						fprintf(stderr, "\e[31;1mError: Miss redirect file parameters.\n\e[0m");
 						break;
+					case ERROR_PIPE:
+						fprintf(stderr, "\e[31;1mError: Open pipe error.\n\e[0m");
+						break;
+					case ERROR_PIPE_MISS_PARAMETER:
+						fprintf(stderr, "\e[31;1mError: Miss pipe parameters.\n\e[0m");
+						break;
 				}
 			}
 		}
 	}
 }
 
-int isCommandExist(const char* command) {
+int isCommandExist(const char* command) { // 判断指令是否存在
 	if (command == NULL || strlen(command) == 0) return FALSE;
 
 	int result = TRUE;
@@ -143,7 +156,7 @@ int isCommandExist(const char* command) {
 	pid_t pid = vfork();
 	if (pid == -1) {
 		result = FALSE;
-	} else if (pid == 0) {
+	} else if (pid == 0) { // 将执行结果保存在文件中
 		freopen(outputFile, "w", stdout);
 		char tmp[BUF_SZ];
 		sprintf(tmp, "command -v %s", command);
@@ -162,16 +175,16 @@ int isCommandExist(const char* command) {
 	return result;
 }
 
-void getUsername() {
+void getUsername() { // 获取当前登录的用户名
 	struct passwd* pwd = getpwuid(getuid());
 	strcpy(username, pwd->pw_name);
 }
 
-void getHostname() {
+void getHostname() { // 获取主机名
 	gethostname(hostname, BUF_SZ);
 }
 
-int getCurWorkDir() {
+int getCurWorkDir() { // 获取当前的工作目录
 	char* result = getcwd(curPath, BUF_SZ);
 	if (result == NULL)
 		return ERROR_SYSTEM;
@@ -209,31 +222,113 @@ int callExit() { // 发送terminal信号退出进程
 	else return RESULT_NORMAL;
 }
 
-int callCommand(int commandNum) {
-	if (!isCommandExist(commands[0])) {
+int callCommand(int commandNum) { // 给用户使用的函数，用以执行用户输入的命令
+	pid_t pid = fork();
+	if (pid == -1) {
+		return ERROR_FORK;
+	} else if (pid == 0) {
+		/* 获取标准输入、输出的文件标识符 */
+		int inFds = dup(STDIN_FILENO);
+		int outFds = dup(STDOUT_FILENO);
+
+		int result = callCommandWithPipe(0, commandNum);
+		
+		/* 还原标准输入、输出重定向 */
+		dup2(inFds, STDIN_FILENO);
+		dup2(outFds, STDOUT_FILENO);
+		exit(result);
+	} else {
+		int status;
+		waitpid(pid, &status, 0);
+		return WEXITSTATUS(status);
+	}
+}
+
+int callCommandWithPipe(int left, int right) { // 所要执行的指令区间[left, right)，可能含有管道
+	if (left >= right) return RESULT_NORMAL;
+	/* 判断是否有管道命令 */
+	int pipeIdx = -1;
+	for (int i=left; i<right; ++i) {
+		if (strcmp(commands[i], COMMAND_PIPE) == 0) {
+			pipeIdx = i;
+			break;
+		}
+	}
+	if (pipeIdx == -1) { // 不含有管道命令
+		return callCommandWithRedi(left, right);
+	} else if (pipeIdx+1 == right) { // 管道命令'|'后续没有指令，参数缺失
+		return ERROR_PIPE_MISS_PARAMETER;
+	}
+
+	/* 执行命令 */
+	int fds[2];
+	if (pipe(fds) == -1) {
+		return ERROR_PIPE;
+	}
+	int result = RESULT_NORMAL;
+	pid_t pid = vfork();
+	if (pid == -1) {
+		result = ERROR_FORK;
+	} else if (pid == 0) { // 子进程执行单个命令
+		close(fds[0]);
+		dup2(fds[1], STDOUT_FILENO); // 将标准输出重定向到fds[1]
+		close(fds[1]);
+		
+		result = callCommandWithRedi(left, pipeIdx);
+		exit(result);
+	} else { // 父进程递归执行后续命令
+		int status;
+		waitpid(pid, &status, 0);
+		int exitCode = WEXITSTATUS(status);
+		
+		if (exitCode != RESULT_NORMAL) { // 子进程的指令没有正常退出，打印错误信息
+			char info[4096] = {0};
+			char line[BUF_SZ];
+			close(fds[1]);
+			dup2(fds[0], STDIN_FILENO); // 将标准输入重定向到fds[0]
+			close(fds[0]);
+			while(fgets(line, BUF_SZ, stdin) != NULL) { // 读取子进程的错误信息
+				strcat(info, line);
+			}
+			printf("%s", info); // 打印错误信息
+			
+			result = exitCode;
+		} else if (pipeIdx+1 < right){
+			close(fds[1]);
+			dup2(fds[0], STDIN_FILENO); // 将标准输入重定向到fds[0]
+			close(fds[0]);
+			result = callCommandWithPipe(pipeIdx+1, right); // 递归执行后续指令
+		}
+	}
+
+	return result;
+}
+
+int callCommandWithRedi(int left, int right) { // 所要执行的指令区间[left, right)，不含管道，可能含有重定向
+	if (!isCommandExist(commands[left])) { // 指令不存在
 		return ERROR_COMMAND;
 	}	
 
 	/* 判断是否有重定向 */
 	int inNum = 0, outNum = 0;
 	char *inFile = NULL, *outFile = NULL;
-	int endIdx = commandNum;
+	int endIdx = right; // 指令在重定向前的终止下标
 
-	for (int i=0; i<commandNum; ++i) {
-		if (strcmp(commands[i], COMMAND_IN) == 0) {
+	for (int i=left; i<right; ++i) {
+		if (strcmp(commands[i], COMMAND_IN) == 0) { // 输入重定向
 			++inNum;
-			if (i+1 < commandNum)
+			if (i+1 < right)
 				inFile = commands[i+1];
-			else return ERROR_MISS_PARAMETER;
+			else return ERROR_MISS_PARAMETER; // 重定向符号后缺少文件名
 
-			if (endIdx == commandNum) endIdx = i;
-		} else if (strcmp(commands[i], COMMAND_OUT) == 0) {
+			if (endIdx == right) endIdx = i;
+		} else if (strcmp(commands[i], COMMAND_OUT) == 0) { // 输出重定向
 			++outNum;
-			if (i+1 < commandNum)
+			if (i+1 < right)
 				outFile = commands[i+1];
-			else return ERROR_MISS_PARAMETER;
+			else return ERROR_MISS_PARAMETER; // 重定向符号后缺少文件名
 				
-			if (endIdx == commandNum) endIdx = i;
+			if (endIdx == right) endIdx = i;
 		}
 	}
 	/* 处理重定向 */
@@ -264,10 +359,10 @@ int callCommand(int commandNum) {
 
 		/* 执行命令 */
 		char* comm[BUF_SZ];
-		for (int i=0; i<endIdx; ++i)
+		for (int i=left; i<endIdx; ++i)
 			comm[i] = commands[i];
 		comm[endIdx] = NULL;
-		execvp(comm[0], comm);
+		execvp(comm[left], comm+left);
 		exit(errno); // 执行出错，返回errno
 	} else {
 		int status;
@@ -283,7 +378,7 @@ int callCommand(int commandNum) {
 	return result;
 }
 
-int callCd(int commandNum) {
+int callCd(int commandNum) { // 执行cd命令
 	int result = RESULT_NORMAL;
 
 	if (commandNum < 2) {

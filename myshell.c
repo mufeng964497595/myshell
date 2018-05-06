@@ -153,23 +153,42 @@ int isCommandExist(const char* command) { // 判断指令是否存在
 
 	int result = TRUE;
 	
-	pid_t pid = vfork();
-	if (pid == -1) {
+	int fds[2];
+	if (pipe(fds) == -1) {
 		result = FALSE;
-	} else if (pid == 0) { // 将执行结果保存在文件中
-		freopen(outputFile, "w", stdout);
-		char tmp[BUF_SZ];
-		sprintf(tmp, "command -v %s", command);
-		system(tmp);
-		exit(1);
 	} else {
-		waitpid(pid, NULL, 0);
+		/* 暂存输入输出重定向标志 */
+		int inFd = dup(STDIN_FILENO);
+		int outFd = dup(STDOUT_FILENO);
 
-		FILE* fp = fopen(outputFile, "r");
-		if (fp == NULL || fgetc(fp) == EOF) { // 文件不存在或者文件中无数据，意味着命令不存在
+		pid_t pid = vfork();
+		if (pid == -1) {
 			result = FALSE;
+		} else if (pid == 0) {
+			/* 将结果输出重定向到文件标识符 */
+			close(fds[0]);
+			dup2(fds[1], STDOUT_FILENO);
+			close(fds[1]);
+
+			char tmp[BUF_SZ];
+			sprintf(tmp, "command -v %s", command);
+			system(tmp);
+			exit(1);
+		} else {
+			waitpid(pid, NULL, 0);
+			/* 输入重定向 */
+			close(fds[1]);
+			dup2(fds[0], STDIN_FILENO);
+			close(fds[0]);
+
+			if (getchar() == EOF) { // 没有数据，意味着命令不存在
+				result = FALSE;
+			}
+			
+			/* 恢复输入、输出重定向 */
+			dup2(inFd, STDIN_FILENO);
+			dup2(outFd, STDOUT_FILENO);
 		}
-		fclose(fp);
 	}
 
 	return result;
